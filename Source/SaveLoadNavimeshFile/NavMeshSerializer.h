@@ -111,6 +111,22 @@ public:
     UFUNCTION(BlueprintCallable, Category = "NavMesh|Build")
     void CancelNavMeshBuildForAgent(FName AgentName);
 
+    /** 指定エージェントのRecastNavMeshのエージェント半径を設定する。
+     *  次回のビルド（RebuildAll等）で反映される。 */
+    UFUNCTION(BlueprintCallable, Category = "NavMesh|Build")
+    void SetAgentRadiusForAgent(FName AgentName, float NewRadius);
+
+    /** 指定エージェントのRecastNavMeshの最大スロープ角度（度）を設定する。
+     *  次回のビルド（RebuildAll等）で反映される。 */
+    UFUNCTION(BlueprintCallable, Category = "NavMesh|Build")
+    void SetAgentMaxSlopeForAgent(FName AgentName, float NewMaxSlope);
+
+    /** 指定エージェントのRecastNavMeshの最大段差高さ（cm）を設定する。
+     *  全Resolution（Default/Low/High）に一括で適用される。
+     *  次回のビルド（RebuildAll等）で反映される。 */
+    UFUNCTION(BlueprintCallable, Category = "NavMesh|Build")
+    void SetAgentMaxStepHeightForAgent(FName AgentName, float NewMaxStepHeight);
+
     //----------------------------------------------------------------------//
     // デリゲート
     //----------------------------------------------------------------------//

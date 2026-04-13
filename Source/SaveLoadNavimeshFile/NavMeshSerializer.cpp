@@ -18,7 +18,6 @@ ANavMeshSerializer::ANavMeshSerializer()
 {
     PrimaryActorTick.bCanEverTick = true;
     PrimaryActorTick.bStartWithTickEnabled = false;
-    PrimaryActorTick.bTickEvenWhenPaused = true;
 }
 
 //======================================================================//
@@ -856,6 +855,66 @@ void ANavMeshSerializer::CancelNavMeshBuildForAgent(FName AgentName)
         TEXT("NavMeshSerializer: Build cancelled for agent [%s]. "
             "Already-built tiles remain. Call EnableNavMeshDynamicRebuild to restart."),
         *AgentName.ToString());
+}
+
+void ANavMeshSerializer::SetAgentRadiusForAgent(FName AgentName, float NewRadius)
+{
+    ARecastNavMesh* NavMesh = FindNavMeshByAgentName(AgentName);
+    if (!NavMesh)
+    {
+        UE_LOG(LogTemp, Error,
+            TEXT("NavMeshSerializer: Cannot set AgentRadius — agent [%s] not found"),
+            *AgentName.ToString());
+        return;
+    }
+
+    NavMesh->AgentRadius = FMath::Max(0.0f, NewRadius);
+
+    UE_LOG(LogTemp, Log,
+        TEXT("NavMeshSerializer: AgentRadius set to %.2f for agent [%s]. Rebuild to apply."),
+        NavMesh->AgentRadius, *AgentName.ToString());
+}
+
+void ANavMeshSerializer::SetAgentMaxSlopeForAgent(FName AgentName, float NewMaxSlope)
+{
+    ARecastNavMesh* NavMesh = FindNavMeshByAgentName(AgentName);
+    if (!NavMesh)
+    {
+        UE_LOG(LogTemp, Error,
+            TEXT("NavMeshSerializer: Cannot set AgentMaxSlope — agent [%s] not found"),
+            *AgentName.ToString());
+        return;
+    }
+
+    NavMesh->AgentMaxSlope = FMath::Clamp(NewMaxSlope, 0.0f, 89.0f);
+
+    UE_LOG(LogTemp, Log,
+        TEXT("NavMeshSerializer: AgentMaxSlope set to %.2f for agent [%s]. Rebuild to apply."),
+        NavMesh->AgentMaxSlope, *AgentName.ToString());
+}
+
+void ANavMeshSerializer::SetAgentMaxStepHeightForAgent(FName AgentName, float NewMaxStepHeight)
+{
+    ARecastNavMesh* NavMesh = FindNavMeshByAgentName(AgentName);
+    if (!NavMesh)
+    {
+        UE_LOG(LogTemp, Error,
+            TEXT("NavMeshSerializer: Cannot set AgentMaxStepHeight — agent [%s] not found"),
+            *AgentName.ToString());
+        return;
+    }
+
+    const float ClampedValue = FMath::Max(0.0f, NewMaxStepHeight);
+
+    // 全Resolution（Default, Low, High等）に一括適用
+    for (uint8 i = 0; i < static_cast<uint8>(ENavigationDataResolution::MAX); ++i)
+    {
+        NavMesh->SetAgentMaxStepHeight(static_cast<ENavigationDataResolution>(i), ClampedValue);
+    }
+
+    UE_LOG(LogTemp, Log,
+        TEXT("NavMeshSerializer: AgentMaxStepHeight set to %.2f for agent [%s] (all resolutions). Rebuild to apply."),
+        ClampedValue, *AgentName.ToString());
 }
 
 //======================================================================//
