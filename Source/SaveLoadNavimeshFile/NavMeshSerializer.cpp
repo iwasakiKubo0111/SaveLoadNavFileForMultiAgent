@@ -8,6 +8,7 @@
 #include "Serialization/ObjectAndNameAsStringProxyArchive.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
+#include "Misc/Compression.h"
 #include "HAL/PlatformFileManager.h"
 #include "EngineUtils.h"
 #include "Engine/Engine.h"
@@ -1243,6 +1244,7 @@ bool ANavMeshSerializer::SaveSingleNavMesh(ARecastNavMesh* NavMesh, const FStrin
 {
     if (!NavMesh) return false;
 
+    // 1. シリアライズ
     TArray<uint8> NavMeshData;
     FMemoryWriter MemWriter(NavMeshData, true);
     FObjectAndNameAsStringProxyArchive Writer(MemWriter, false);
@@ -1256,8 +1258,50 @@ bool ANavMeshSerializer::SaveSingleNavMesh(ARecastNavMesh* NavMesh, const FStrin
         return false;
     }
 
-    if (FFileHelper::SaveArrayToFile(NavMeshData, *FilePath))
+    const int32 UncompressedSize = NavMeshData.Num();
+
+    // 2. 圧縮
+
+    // UncompressedSizeを圧縮する前に、最悪でも必要なメモリ(バッファ)サイズを取得
+    // MEMO : 圧縮後サイズは事前に正確には分からないので最悪数必要なメモリを確保する必要がある
+    int32 CompressedSize = FCompression::CompressMemoryBound(NAME_Zlib, UncompressedSize);
+    TArray<uint8> CompressedData;
+
+    // メモリ(バッファ)を確保 この後すぐに圧縮データで上書きするため初期化は必要なし(UnInitialize)
+    CompressedData.SetNumUninitialized(CompressedSize);
+
+    // 圧縮を実施
+    if (!FCompression::CompressMemory(
+        NAME_Zlib,                      // 使用する圧縮アルゴリズム
+        CompressedData.GetData(),       // 圧縮後のデータを書き込む先頭アドレス
+        CompressedSize,                 // 入出力兼用 : 関数を呼ぶ前は何バイトまで書き込んで良いか 呼んだ後は実際に書き込まれた圧縮後のサイズとなる
+        NavMeshData.GetData(),          // 圧縮したい元データの先頭アドレス(このデータを圧縮してねという入力元)
+        UncompressedSize))              // 元データのサイズ 第4引数の先頭から何バイトを読み取るか教える
     {
+        UE_LOG(LogTemp, Error,
+            TEXT("NavMeshSerializer: Compression failed for agent [%s]"),
+            *GetAgentNameFromNavMesh(NavMesh).ToString());
+        return false;
+    }
+
+    // 実際に書き込まれた圧縮後のサイズとする(SetNumUninitializedでは最大サイズ確保したので実際に必要だった分まで切り詰める)
+    CompressedData.SetNum(CompressedSize);
+
+    // 3. ヘッダー(非圧縮サイズ)+圧縮データを書き出し
+    TArray<uint8> FileData;
+    FileData.SetNumUninitialized(sizeof(int32) + CompressedSize);// 先頭32ビットに展開時に必要なメモリ(バッファ)量値を格納
+    FMemory::Memcpy(FileData.GetData(), &UncompressedSize, sizeof(int32));
+    FMemory::Memcpy(FileData.GetData() + sizeof(int32), CompressedData.GetData(), CompressedSize);
+
+    if (FFileHelper::SaveArrayToFile(FileData, *FilePath))
+    {
+        const float Ratio = (UncompressedSize > 0)
+            ? static_cast<float>(CompressedSize) / static_cast<float>(UncompressedSize) * 100.0f
+            : 0.0f;
+        UE_LOG(LogTemp, Log,
+            TEXT("NavMeshSerializer: Saved agent [%s] compressed: %d -> %d bytes (%.1f%%)"),
+            *GetAgentNameFromNavMesh(NavMesh).ToString(),
+            UncompressedSize, CompressedSize, Ratio);
         return true;
     }
 
@@ -1353,14 +1397,51 @@ bool ANavMeshSerializer::LoadSingleNavMesh(ARecastNavMesh* NavMesh, const FStrin
 {
     if (!NavMesh) return false;
 
-    TArray<uint8> NavMeshData;
-    if (!FFileHelper::LoadFileToArray(NavMeshData, *FilePath))
+    // 1. ファイル読み込み
+    TArray<uint8> FileData;
+    if (!FFileHelper::LoadFileToArray(FileData, *FilePath))
     {
         UE_LOG(LogTemp, Error,
             TEXT("NavMeshSerializer: Failed to read file [%s]"), *FilePath);
         return false;
     }
 
+    if (FileData.Num() <= static_cast<int32>(sizeof(int32)))
+    {
+        UE_LOG(LogTemp, Error,
+            TEXT("NavMeshSerializer: File too small to contain valid data [%s]"), *FilePath);
+        return false;
+    }
+
+    // 2. ヘッダーから非圧縮サイズを読み取り
+    int32 UncompressedSize = 0;
+    FMemory::Memcpy(&UncompressedSize, FileData.GetData(), sizeof(int32));// 先頭32ビットに展開時に必要なメモリ(非圧縮サイズ)が記載されているのでコピー
+
+    if (UncompressedSize <= 0)
+    {
+        UE_LOG(LogTemp, Error,
+            TEXT("NavMeshSerializer: Invalid uncompressed size in file [%s]"), *FilePath);
+        return false;
+    }
+
+    // 3. 解凍
+    const int32 CompressedSize = FileData.Num() - sizeof(int32);// 先頭32ビットに展開時に必要なメモリが記載されているがこの時は必要ないので引く(つまり実データサイズとなる)
+    TArray<uint8> NavMeshData;
+    NavMeshData.SetNumUninitialized(UncompressedSize);
+
+    if (!FCompression::UncompressMemory(
+        NAME_Zlib,
+        NavMeshData.GetData(),              // どこ(のアドレスから)に入れるか
+        UncompressedSize,                   // どれくらいメモリバッファを空けるか(非圧縮サイズ分空けなくてはいけない)
+        FileData.GetData() + sizeof(int32), // 先頭32ビットを飛ばしたアドレスから読み取りを指示(圧縮データのアドレス)
+        CompressedSize))                    // どれくらい読み取るか
+    {
+        UE_LOG(LogTemp, Error,
+            TEXT("NavMeshSerializer: Decompression failed for file [%s]"), *FilePath);
+        return false;
+    }
+
+    // 4. デシリアライズ
     FMemoryReader MemReader(NavMeshData, true);
     FObjectAndNameAsStringProxyArchive Reader(MemReader, true);
     NavMesh->Serialize(Reader);
@@ -1372,6 +1453,11 @@ bool ANavMeshSerializer::LoadSingleNavMesh(ARecastNavMesh* NavMesh, const FStrin
             TEXT("NavMeshSerializer: Applied offset %s to agent [%s]"),
             *StageOffset.ToString(), *GetAgentNameFromNavMesh(NavMesh).ToString());
     }
+
+    UE_LOG(LogTemp, Log,
+        TEXT("NavMeshSerializer: Loaded agent [%s] decompressed: %d -> %d bytes"),
+        *GetAgentNameFromNavMesh(NavMesh).ToString(),
+        CompressedSize, UncompressedSize);
 
     return true;
 }
