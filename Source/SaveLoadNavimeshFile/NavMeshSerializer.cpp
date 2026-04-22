@@ -918,6 +918,65 @@ void ANavMeshSerializer::SetAgentMaxStepHeightForAgent(FName AgentName, float Ne
         ClampedValue, *AgentName.ToString());
 }
 
+void ANavMeshSerializer::NotifyNavigationUpdateForAgent(FName AgentName)
+{
+    UNavigationSystemV1* NavSys =
+        FNavigationSystem::GetCurrent<UNavigationSystemV1>(GetWorld());
+    if (!NavSys)
+    {
+        UE_LOG(LogTemp, Error, TEXT("NavMeshSerializer: NavigationSystem not found"));
+        return;
+    }
+
+    ARecastNavMesh* TargetNavMesh = FindNavMeshByAgentName(AgentName);
+    if (!TargetNavMesh)
+    {
+        UE_LOG(LogTemp, Error,
+            TEXT("NavMeshSerializer: Cannot notify update — agent [%s] not found"),
+            *AgentName.ToString());
+        return;
+    }
+
+    // OctreeLockを一時解除してOctreeを最新状態にする
+    NavSys->SetNavigationOctreeLock(false);
+
+    // ダミーアクターを動かしダミーアクター周辺だけビルドされるかテスト
+    FVector OriginalLocation = DumyActor->GetActorLocation();
+    DumyActor->SetActorLocation(OriginalLocation + 1, false, nullptr, ETeleportType::TeleportPhysics);
+    DumyActor->SetActorLocation(OriginalLocation, false, nullptr, ETeleportType::TeleportPhysics);
+
+    // Octreeの更新をフラッシュ（ジオメトリ情報を最新化）
+    // ただしここではダーティ領域の配信は全エージェントに行われてしまうため、
+    // 対象以外はすぐキャンセルする
+    NavSys->Tick(0.0f);
+
+    // OctreeLockを戻す
+    NavSys->SetNavigationOctreeLock(true);
+
+    // 対象以外のエージェントでキューに入ったタスクをキャンセル
+    TArray<ARecastNavMesh*> AllNavMeshes = GetAllRecastNavMeshes();
+    for (ARecastNavMesh* NavMesh : AllNavMeshes)
+    {
+        if (NavMesh != TargetNavMesh)
+        {
+            FNavDataGenerator* Generator = NavMesh->GetGenerator();
+            if (Generator && Generator->GetNumRemaningBuildTasks() > 0)
+            {
+                Generator->CancelBuild();
+
+                UE_LOG(LogTemp, Log,
+                    TEXT("NavMeshSerializer: Cancelled pending build tasks for agent [%s] (protected from update)"),
+                    *GetAgentNameFromNavMesh(NavMesh).ToString());
+            }
+        }
+    }
+
+    UE_LOG(LogTemp, Log,
+        TEXT("NavMeshSerializer: Navigation update notified for agent [%s] only. "
+            "%d other agent(s) had their pending tasks cancelled."),
+        *AgentName.ToString(), AllNavMeshes.Num() - 1);
+}
+
 //======================================================================//
 // 可視化
 //======================================================================//
@@ -1261,22 +1320,14 @@ bool ANavMeshSerializer::SaveSingleNavMesh(ARecastNavMesh* NavMesh, const FStrin
     const int32 UncompressedSize = NavMeshData.Num();
 
     // 2. 圧縮
-
-    // UncompressedSizeを圧縮する前に、最悪でも必要なメモリ(バッファ)サイズを取得
-    // MEMO : 圧縮後サイズは事前に正確には分からないので最悪数必要なメモリを確保する必要がある
     int32 CompressedSize = FCompression::CompressMemoryBound(NAME_Zlib, UncompressedSize);
     TArray<uint8> CompressedData;
-
-    // メモリ(バッファ)を確保 この後すぐに圧縮データで上書きするため初期化は必要なし(UnInitialize)
     CompressedData.SetNumUninitialized(CompressedSize);
 
-    // 圧縮を実施
     if (!FCompression::CompressMemory(
-        NAME_Zlib,                      // 使用する圧縮アルゴリズム
-        CompressedData.GetData(),       // 圧縮後のデータを書き込む先頭アドレス
-        CompressedSize,                 // 入出力兼用 : 関数を呼ぶ前は何バイトまで書き込んで良いか 呼んだ後は実際に書き込まれた圧縮後のサイズとなる
-        NavMeshData.GetData(),          // 圧縮したい元データの先頭アドレス(このデータを圧縮してねという入力元)
-        UncompressedSize))              // 元データのサイズ 第4引数の先頭から何バイトを読み取るか教える
+        NAME_Zlib,
+        CompressedData.GetData(), CompressedSize,
+        NavMeshData.GetData(), UncompressedSize))
     {
         UE_LOG(LogTemp, Error,
             TEXT("NavMeshSerializer: Compression failed for agent [%s]"),
@@ -1284,12 +1335,11 @@ bool ANavMeshSerializer::SaveSingleNavMesh(ARecastNavMesh* NavMesh, const FStrin
         return false;
     }
 
-    // 実際に書き込まれた圧縮後のサイズとする(SetNumUninitializedでは最大サイズ確保したので実際に必要だった分まで切り詰める)
     CompressedData.SetNum(CompressedSize);
 
-    // 3. ヘッダー(非圧縮サイズ)+圧縮データを書き出し
+    // 3. ヘッダー（非圧縮サイズ）+ 圧縮データ を書き出し
     TArray<uint8> FileData;
-    FileData.SetNumUninitialized(sizeof(int32) + CompressedSize);// 先頭32ビットに展開時に必要なメモリ(バッファ)量値を格納
+    FileData.SetNumUninitialized(sizeof(int32) + CompressedSize);
     FMemory::Memcpy(FileData.GetData(), &UncompressedSize, sizeof(int32));
     FMemory::Memcpy(FileData.GetData() + sizeof(int32), CompressedData.GetData(), CompressedSize);
 
@@ -1415,7 +1465,7 @@ bool ANavMeshSerializer::LoadSingleNavMesh(ARecastNavMesh* NavMesh, const FStrin
 
     // 2. ヘッダーから非圧縮サイズを読み取り
     int32 UncompressedSize = 0;
-    FMemory::Memcpy(&UncompressedSize, FileData.GetData(), sizeof(int32));// 先頭32ビットに展開時に必要なメモリ(非圧縮サイズ)が記載されているのでコピー
+    FMemory::Memcpy(&UncompressedSize, FileData.GetData(), sizeof(int32));
 
     if (UncompressedSize <= 0)
     {
@@ -1425,16 +1475,14 @@ bool ANavMeshSerializer::LoadSingleNavMesh(ARecastNavMesh* NavMesh, const FStrin
     }
 
     // 3. 解凍
-    const int32 CompressedSize = FileData.Num() - sizeof(int32);// 先頭32ビットに展開時に必要なメモリが記載されているがこの時は必要ないので引く(つまり実データサイズとなる)
+    const int32 CompressedSize = FileData.Num() - sizeof(int32);
     TArray<uint8> NavMeshData;
     NavMeshData.SetNumUninitialized(UncompressedSize);
 
     if (!FCompression::UncompressMemory(
         NAME_Zlib,
-        NavMeshData.GetData(),              // どこ(のアドレスから)に入れるか
-        UncompressedSize,                   // どれくらいメモリバッファを空けるか(非圧縮サイズ分空けなくてはいけない)
-        FileData.GetData() + sizeof(int32), // 先頭32ビットを飛ばしたアドレスから読み取りを指示(圧縮データのアドレス)
-        CompressedSize))                    // どれくらい読み取るか
+        NavMeshData.GetData(), UncompressedSize,
+        FileData.GetData() + sizeof(int32), CompressedSize))
     {
         UE_LOG(LogTemp, Error,
             TEXT("NavMeshSerializer: Decompression failed for file [%s]"), *FilePath);

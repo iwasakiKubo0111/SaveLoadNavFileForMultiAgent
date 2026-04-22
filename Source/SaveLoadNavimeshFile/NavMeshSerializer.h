@@ -127,6 +127,13 @@ public:
     UFUNCTION(BlueprintCallable, Category = "NavMesh|Build")
     void SetAgentMaxStepHeightForAgent(FName AgentName, float NewMaxStepHeight);
 
+    /** NavigationOctreeを一時的にアンロックしてダーティ領域を検知させ、
+     *  指定エージェントのNavMeshだけを更新する。
+     *  他のエージェントにキューされたビルドタスクは即座にキャンセルされる。
+     *  使い方: Actorを動かした後にこの関数を呼び、その後にセーブする。 */
+    UFUNCTION(BlueprintCallable, Category = "NavMesh|Tiles")
+    void NotifyNavigationUpdateForAgent(FName AgentName);
+
     //----------------------------------------------------------------------//
     // デリゲート
     //----------------------------------------------------------------------//
@@ -159,6 +166,9 @@ public:
      *  0の場合はNavMeshのデフォルト値をそのまま使用。 */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "NavMesh|Build", meta = (ClampMin = "0", UIMin = "0"))
     int32 MaxTileJobsCount = 0;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "NavMesh|Debug")
+    AActor* DumyActor = NULL;
 
 private:
     //----------------------------------------------------------------------//
