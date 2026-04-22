@@ -1516,3 +1516,5 @@ void ANavMeshSerializer::OnNavDataRegistrationComplete()
         TEXT("NavMeshSerializer: NavData registration complete for all agents."));
     OnLoadComplete.Broadcast();
 }
+
+//別メモ : https://claude.ai/share/b7b235dd-b4b4-4d07-a704-df8a3866aa00
